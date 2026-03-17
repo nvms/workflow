@@ -487,4 +487,39 @@ describe('@prsm/workflow', () => {
     expect(captured.key).toBe(`${started.id}:work`)
     expect(captured.attempt).toBe(1)
   })
+
+  it('processes a batch of executions concurrently', async () => {
+    let peak = 0
+    let inflight = 0
+
+    const workflow = defineWorkflow({
+      name: 'concurrent',
+      version: '1',
+      start: 'work',
+      steps: {
+        work: {
+          type: 'activity',
+          next: 'done',
+          run: async () => {
+            inflight++
+            peak = Math.max(peak, inflight)
+            await new Promise((r) => setTimeout(r, 50))
+            inflight--
+            return {}
+          },
+        },
+        done: { type: 'succeed' },
+      },
+    })
+
+    const engine = new WorkflowEngine({ storage: memoryDriver(), batchSize: 5 })
+    engine.register(workflow)
+
+    for (let i = 0; i < 5; i++) await engine.start('concurrent', {})
+    await engine.runUntilIdle()
+
+    const executions = await engine.listExecutions({ workflow: 'concurrent' })
+    expect(executions.every((e) => e.status === 'succeeded')).toBe(true)
+    expect(peak).toBe(5)
+  })
 })

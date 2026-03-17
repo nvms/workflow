@@ -242,13 +242,11 @@ export class WorkflowEngine extends EventEmitter {
       leaseMs: this._leaseMs,
     })
 
-    let processed = 0
-    for (const item of claimed) {
-      await this._processExecution(item.id)
-      processed++
-    }
+    const results = await Promise.allSettled(
+      claimed.map((item) => this._processExecution(item.id)),
+    )
 
-    return processed
+    return results.length
   }
 
   async runUntilIdle(options = {}) {

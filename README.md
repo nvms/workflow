@@ -127,7 +127,7 @@ const engine = new WorkflowEngine({
   leaseRenewInterval: '100s', // how often the lease is renewed while a step is running (defaults to leaseMs / 3)
   defaultActivityTimeout: '30s',
   owner: 'node-a', // worker identity written into claims and checked on save
-  batchSize: 10, // max ready executions to claim in one polling cycle
+  batchSize: 10, // max executions to claim and process concurrently per polling cycle
 })
 ```
 
@@ -294,7 +294,7 @@ engine.on('execution:lease-lost', ({ executionId, step }) => {})
 
 Workflow graphs are versioned and static. `activity` steps run code and move to one `next` step. `decision` steps choose one named route from a fixed map. Terminal steps end the execution.
 
-Workers claim ready executions using a lease. While a step is running, the worker renews that lease. If the lease expires, another worker can reclaim the execution. Saves are guarded by lock owner so a stale worker cannot commit after losing ownership.
+Workers claim ready executions using a lease and process them concurrently (up to `batchSize` per polling cycle). While a step is running, the worker renews that lease. If the lease expires, another worker can reclaim the execution. Saves are guarded by lock owner so a stale worker cannot commit after losing ownership.
 
 The execution model is at-least-once. Activity handlers must be idempotent.
 
