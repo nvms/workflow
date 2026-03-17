@@ -93,9 +93,8 @@ describeIfPostgres("postgres driver", () => {
 
     const storage = postgresDriver({ connectionString })
     const engine = new WorkflowEngine({ storage })
-    engine.register(makeWorkflow(async ({ data }) => {
-      data.recovered = true
-      return { ok: true }
+    engine.register(makeWorkflow(async () => {
+      return { recovered: true }
     }))
 
     const execution = await engine.start("pg-workflow", {})

@@ -30,9 +30,8 @@ describeIfSqlite('sqlite driver', () => {
         'step-a': {
           type: 'activity',
           next: 'done',
-          run: async ({ data }) => {
-            data.count = 1
-            return { ok: true }
+          run: async () => {
+            return { count: 1 }
           },
         },
         done: {

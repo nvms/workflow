@@ -146,9 +146,8 @@ describe('@prsm/workflow', () => {
         fetch: {
           type: 'activity',
           next: 'route',
-          run: async ({ input, data }) => {
-            data.message = input.message.trim()
-            return { normalized: data.message }
+          run: async ({ input }) => {
+            return { message: input.message.trim() }
           },
         },
         route: {
@@ -521,5 +520,53 @@ describe('@prsm/workflow', () => {
     const executions = await engine.listExecutions({ workflow: 'concurrent' })
     expect(executions.every((e) => e.status === 'succeeded')).toBe(true)
     expect(peak).toBe(5)
+  })
+
+  it('merges step return values into data and provides read-only data to steps', async () => {
+    let capturedData = null
+
+    const workflow = defineWorkflow({
+      name: 'merge',
+      version: '1',
+      start: 'a',
+      steps: {
+        a: {
+          type: 'activity',
+          next: 'b',
+          run: async () => ({ x: 1 }),
+        },
+        b: {
+          type: 'activity',
+          next: 'check',
+          run: async ({ data }) => {
+            data.x = 999
+            return { y: 2 }
+          },
+        },
+        check: {
+          type: 'activity',
+          next: 'done',
+          run: async ({ data }) => {
+            capturedData = { ...data }
+            return {}
+          },
+        },
+        done: {
+          type: 'succeed',
+          result: ({ data }) => data,
+        },
+      },
+    })
+
+    const engine = new WorkflowEngine({ storage: memoryDriver() })
+    engine.register(workflow)
+    const started = await engine.start('merge', {})
+    await engine.runUntilIdle()
+
+    const execution = await engine.getExecution(started.id)
+    expect(execution.status).toBe('succeeded')
+    expect(capturedData.x).toBe(1)
+    expect(capturedData.y).toBe(2)
+    expect(execution.output).toEqual({ x: 1, y: 2 })
   })
 })

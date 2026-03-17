@@ -61,8 +61,8 @@ function stepContext(execution, workflow, stepName) {
       name: workflow.name,
       version: workflow.version,
     },
-    input: execution.input,
-    data: execution.data,
+    input: clone(execution.input),
+    data: clone(execution.data),
     metadata: execution.metadata,
     steps: clone(execution.steps),
     step: {
@@ -353,6 +353,10 @@ export class WorkflowEngine extends EventEmitter {
           timeoutMs,
           `Step "${stepName}" timed out after ${timeoutMs}ms`,
         )
+
+        if (output != null && typeof output === 'object' && !Array.isArray(output)) {
+          Object.assign(execution.data, output)
+        }
 
         stepState.status = 'succeeded'
         stepState.output = clone(output)
