@@ -1,0 +1,31 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: workflow-postgres
+    platform: linux/amd64
+    environment:
+      POSTGRES_DB: workflow_test
+      POSTGRES_USER: workflow
+      POSTGRES_PASSWORD: workflow_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - workflow-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U workflow -d workflow_test"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  sqlite-web:
+    image: coleifer/sqlite-web:latest
+    container_name: workflow-sqlite-web
+    platform: linux/amd64
+    ports:
+      - "8082:8080"
+    volumes:
+      - ./:/data
+    command: ["sqlite_web", "/data/workflow.db", "--host", "0.0.0.0", "--port", "8080"]
+
+volumes:
+  workflow-postgres-data:

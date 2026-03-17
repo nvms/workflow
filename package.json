@@ -1,0 +1,70 @@
+{
+  "name": "@prsm/workflow",
+  "version": "1.0.0",
+  "description": "Durable, inspectable workflow engine",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./types/index.d.ts",
+      "default": "./src/index.js"
+    },
+    "./postgres": {
+      "types": "./types/postgresDriver.d.ts",
+      "default": "./src/postgresDriver.js"
+    },
+    "./sqlite": {
+      "types": "./types/sqliteDriver.d.ts",
+      "default": "./src/sqliteDriver.js"
+    }
+  },
+  "types": "./types/index.d.ts",
+  "files": [
+    "src",
+    "types"
+  ],
+  "scripts": {
+    "test": "vitest --reporter=verbose --run",
+    "test:watch": "vitest",
+    "prepublishOnly": "npx tsc --declaration --allowJs --emitDeclarationOnly --skipLibCheck --target es2020 --module nodenext --moduleResolution nodenext --strict false --esModuleInterop true --outDir ./types src/index.js src/sqliteDriver.js src/postgresDriver.js"
+  },
+  "keywords": [
+    "workflow",
+    "durable",
+    "orchestration",
+    "state-machine",
+    "inspection"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nvms/workflow.git"
+  },
+  "homepage": "https://github.com/nvms/workflow#readme",
+  "bugs": {
+    "url": "https://github.com/nvms/workflow/issues"
+  },
+  "dependencies": {
+    "@prsm/ms": "^1.0.1"
+  },
+  "peerDependencies": {
+    "pg": "^8.0.0",
+    "sqlite3": "^5.0.0"
+  },
+  "peerDependenciesMeta": {
+    "sqlite3": {
+      "optional": true
+    },
+    "pg": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "pg": "^8.16.3",
+    "sqlite3": "^5.1.6",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
