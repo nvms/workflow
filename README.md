@@ -22,7 +22,7 @@ npm install pg
 ## Quick Start
 
 ```js
-import WorkflowEngine, { defineWorkflow, memoryDriver } from '@prsm/workflow'
+import WorkflowEngine, { defineWorkflow } from '@prsm/workflow'
 
 const workflow = defineWorkflow({
   name: 'review',
@@ -33,16 +33,11 @@ const workflow = defineWorkflow({
       type: 'activity',
       next: 'route',
       retry: { maxAttempts: 3, backoff: '5s' },
-      run: async ({ input }) => {
-        return { message: input.message.trim() }
-      },
+      run: async ({ input }) => ({ message: input.message.trim() }),
     },
     route: {
       type: 'decision',
-      transitions: {
-        spam: 'reject',
-        normal: 'complete',
-      },
+      transitions: { spam: 'reject', normal: 'complete' },
       decide: ({ data }) => (data.message.includes('buy now') ? 'spam' : 'normal'),
     },
     complete: {
@@ -56,23 +51,16 @@ const workflow = defineWorkflow({
   },
 })
 
-const engine = new WorkflowEngine({
-  storage: memoryDriver(),
-})
-
+const engine = new WorkflowEngine()
 engine.register(workflow)
 
 const execution = await engine.start('review', { message: '  hello  ' })
 await engine.runUntilIdle()
 
-console.log((await engine.getExecution(execution.id)).status)
-// succeeded
+const result = await engine.getExecution(execution.id)
+console.log(result.status) // "succeeded"
+console.log(result.output) // { outcome: "sent", message: "hello" }
 ```
-
-In that example:
-
-- `engine.start('review', input)` creates a workflow execution
-- `engine.runUntilIdle()` processes ready executions until nothing is immediately runnable
 
 ## Step Types
 
@@ -158,39 +146,44 @@ engine.describe(name, version?)
 
 ### In a Real App
 
-Typical project layout:
-
-```
-workflows/review.js   - defineWorkflow()
-workflow/engine.js    - engine setup + startWorker()
-routes/reviews.js     - HTTP routes that call engine.start()
-server.js             - express app entry point
-```
-
-Engine setup - create the engine once, register workflows, start the worker:
+Create the engine once, register workflows, start the worker loop. Trigger workflows from routes, jobs, or anywhere else.
 
 ```js
-// workflow/engine.js
+// workflows/engine.js
 import WorkflowEngine from '@prsm/workflow'
 import { postgresDriver } from '@prsm/workflow/postgres'
-import { reviewWorkflow } from '../workflows/review.js'
+import { triageWorkflow } from './triage.js'
 
 export const engine = new WorkflowEngine({
   storage: postgresDriver({ connectionString: process.env.DATABASE_URL }),
-  owner: `api-${process.pid}`,
+  owner: `worker-${process.pid}`,
+  leaseMs: '30s',
 })
 
-engine.register(reviewWorkflow)
+engine.register(triageWorkflow)
 
-await engine.startWorker()
+engine.on('execution:succeeded', ({ execution }) => {
+  console.log('done:', execution.id, execution.output)
+})
+
+engine.on('execution:failed', ({ execution }) => {
+  console.error('failed:', execution.id, execution.error)
+})
+
+await engine.startWorker({ interval: '100ms' })
 ```
 
-Then trigger workflows from routes, jobs, or anywhere else:
-
 ```js
-// routes/reviews.js
-const execution = await engine.start('review', { message: req.body.message })
-res.json({ executionId: execution.id, status: execution.status })
+// routes/tickets.js
+import { engine } from '../workflows/engine.js'
+
+router.post('/', async (req, res) => {
+  const execution = await engine.start('triage', {
+    subject: req.body.subject,
+    message: req.body.message,
+  })
+  res.json({ executionId: execution.id })
+})
 ```
 
 ## Storage
@@ -264,29 +257,46 @@ Use them for external side effects.
 
 ## Graph Introspection
 
-Workflow definitions expose a serializable graph:
+Workflow definitions expose a serializable graph of nodes and edges:
 
 ```js
-const graph = engine.describe('review')
+const { graph } = engine.describe('review')
+// graph.nodes - step name, type, label, retry config, timeout
+// graph.edges - from, to, label (route name for decisions)
 ```
 
-That graph includes nodes and edges, and is intended for future visualization/devtools layers.
-Use it if you want to render the workflow shape in your own UI, inspect it programmatically, or build devtools on top of it.
+[@prsm/devtools](https://github.com/nvms/devtools) uses this to render live workflow visualization alongside execution state, journals, and step output:
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/nvms/devtools/main/.github/executions.png" width="800" alt="workflow execution view in @prsm/devtools">
+</p>
 
 ## Events
+
+Execution lifecycle - use these to sync external state (update your database, push to websockets, trigger alerts):
 
 ```js
 engine.on('execution:queued', ({ execution }) => {})
 engine.on('execution:succeeded', ({ execution }) => {})
 engine.on('execution:failed', ({ execution }) => {})
 engine.on('execution:canceled', ({ execution }) => {})
+```
 
+Step lifecycle - use these for logging, metrics, or debugging:
+
+```js
 engine.on('step:started', ({ execution, step, attempt }) => {})
 engine.on('step:succeeded', ({ execution, step, output }) => {})
 engine.on('step:routed', ({ execution, step, route, to }) => {})
 engine.on('step:retry', ({ execution, step, attempt, error, availableAt }) => {})
 engine.on('step:failed', ({ execution, step, attempt, error }) => {})
+```
+
+Worker health:
+
+```js
 engine.on('execution:lease-lost', ({ executionId, step }) => {})
+engine.on('worker:error', ({ error }) => {})
 ```
 
 ## How It Works
@@ -295,9 +305,11 @@ Workflow graphs are versioned and static. `activity` steps run code and move to 
 
 Workers claim ready executions using a lease and process them concurrently (up to `batchSize` per polling cycle). While a step is running, the worker renews that lease. If the lease expires, another worker can reclaim the execution. Saves are guarded by lock owner so a stale worker cannot commit after losing ownership.
 
-The execution model is at-least-once. Activity handlers must be idempotent.
+### Completed steps are never re-executed
 
-That means a step may run again after timeout, crash, or lease loss, so external side effects must be safe to repeat with the same idempotency key.
+If a worker completes a step but crashes before advancing to the next one, another worker will reclaim the execution. The engine checks whether the current step already succeeded and skips it, advancing directly to the next step without re-running the handler. This prevents duplicate side effects like double-charging a credit card or sending an email twice.
+
+For side effects that happen *within* a step (e.g. the step sends an email, then crashes before the step result is saved), each step exposes a stable `idempotencyKey` (`<executionId>:<stepName>`) that you can pass to external services for deduplication.
 
 ## Distributed Tests
 
