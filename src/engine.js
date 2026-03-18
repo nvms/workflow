@@ -317,6 +317,29 @@ export class WorkflowEngine extends EventEmitter {
     }
 
     const stepState = ensureStepState(execution, stepName)
+
+    if (stepState.status === 'succeeded') {
+      const now = Date.now()
+      execution.updatedAt = now
+      execution.journal.push({ type: 'step.skipped', at: now, step: stepName, reason: 'already succeeded' })
+
+      if (definition.type === 'activity') {
+        execution.currentStep = definition.next
+      } else if (definition.type === 'decision') {
+        execution.currentStep = definition.transitions[stepState.route]
+      } else {
+        return
+      }
+
+      execution.status = 'queued'
+      execution.availableAt = now
+      execution.lockOwner = null
+      execution.lockExpiresAt = null
+      ensureStepState(execution, execution.currentStep)
+      await this._storage.saveExecution(execution, { expectedLockOwner: this._owner })
+      return
+    }
+
     const now = Date.now()
     stepState.status = 'running'
     stepState.attempts += 1

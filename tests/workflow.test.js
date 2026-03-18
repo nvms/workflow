@@ -522,6 +522,99 @@ describe('@prsm/workflow', () => {
     expect(peak).toBe(5)
   })
 
+  it('skips already-succeeded steps instead of re-executing them', async () => {
+    let runCount = 0
+
+    const workflow = defineWorkflow({
+      name: 'idempotent',
+      version: '1',
+      start: 'side-effect',
+      steps: {
+        'side-effect': {
+          type: 'activity',
+          next: 'done',
+          run: async () => {
+            runCount++
+            return { charged: true }
+          },
+        },
+        done: { type: 'succeed', result: ({ data }) => data },
+      },
+    })
+
+    const storage = memoryDriver()
+    const engine = new WorkflowEngine({ storage })
+    engine.register(workflow)
+
+    const started = await engine.start('idempotent', {})
+    await engine.runDue()
+
+    const after = await engine.getExecution(started.id)
+    expect(after.steps['side-effect'].status).toBe('succeeded')
+    expect(runCount).toBe(1)
+
+    // simulate a lease-expired reclaim: rewind execution to the completed step
+    after.status = 'queued'
+    after.currentStep = 'side-effect'
+    after.lockOwner = null
+    after.lockExpiresAt = null
+    await storage.saveExecution(after)
+
+    await engine.runUntilIdle()
+    expect(runCount).toBe(1)
+
+    const final = await engine.getExecution(started.id)
+    expect(final.status).toBe('succeeded')
+    expect(final.output).toEqual({ charged: true })
+    expect(final.journal.some((e) => e.type === 'step.skipped')).toBe(true)
+  })
+
+  it('skips already-succeeded decision steps and follows the stored route', async () => {
+    let decideCount = 0
+
+    const workflow = defineWorkflow({
+      name: 'idempotent-decision',
+      version: '1',
+      start: 'route',
+      steps: {
+        route: {
+          type: 'decision',
+          transitions: { a: 'path-a', b: 'path-b' },
+          decide: () => {
+            decideCount++
+            return 'a'
+          },
+        },
+        'path-a': { type: 'succeed', result: () => 'took-a' },
+        'path-b': { type: 'succeed', result: () => 'took-b' },
+      },
+    })
+
+    const storage = memoryDriver()
+    const engine = new WorkflowEngine({ storage })
+    engine.register(workflow)
+
+    const started = await engine.start('idempotent-decision', {})
+    await engine.runDue()
+
+    const after = await engine.getExecution(started.id)
+    expect(after.steps['route'].status).toBe('succeeded')
+    expect(decideCount).toBe(1)
+
+    after.status = 'queued'
+    after.currentStep = 'route'
+    after.lockOwner = null
+    after.lockExpiresAt = null
+    await storage.saveExecution(after)
+
+    await engine.runUntilIdle()
+    expect(decideCount).toBe(1)
+
+    const final = await engine.getExecution(started.id)
+    expect(final.status).toBe('succeeded')
+    expect(final.output).toBe('took-a')
+  })
+
   it('merges step return values into data and provides read-only data to steps', async () => {
     let capturedData = null
 
