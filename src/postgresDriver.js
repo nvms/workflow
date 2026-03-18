@@ -1,14 +1,7 @@
-function clone(value) {
-  return value == null ? value : JSON.parse(JSON.stringify(value))
-}
+import { clone } from './util.js'
 
 export function postgresDriver(options = {}) {
   const opts = {
-    host: 'localhost',
-    port: 5432,
-    database: 'workflow_test',
-    user: 'workflow',
-    password: 'workflow_password',
     max: 10,
     ...options,
   }

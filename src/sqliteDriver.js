@@ -1,8 +1,5 @@
 import sqlite3 from 'sqlite3'
-
-function clone(value) {
-  return value == null ? value : JSON.parse(JSON.stringify(value))
-}
+import { clone } from './util.js'
 
 function run(db, sql, params = []) {
   return new Promise((resolve, reject) => {

@@ -662,4 +662,134 @@ describe('@prsm/workflow', () => {
     expect(capturedData.y).toBe(2)
     expect(execution.output).toEqual({ x: 1, y: 2 })
   })
+
+  it('isolates all context fields from step mutations', async () => {
+    const workflow = defineWorkflow({
+      name: 'isolation',
+      version: '1',
+      start: 'mutator',
+      steps: {
+        mutator: {
+          type: 'activity',
+          next: 'verifier',
+          run: async (ctx) => {
+            ctx.input.injected = true
+            ctx.data.injected = true
+            ctx.metadata.injected = true
+            ctx.steps.fabricated = { fake: true }
+            ctx.step.name = 'hacked'
+            return { mutatorRan: true }
+          },
+        },
+        verifier: {
+          type: 'activity',
+          next: 'done',
+          run: async (ctx) => {
+            return {
+              inputClean: !ctx.input.injected,
+              dataClean: !ctx.data.injected,
+              metadataClean: !ctx.metadata.injected,
+              stepsClean: !ctx.steps.fabricated,
+              stepNameCorrect: ctx.step.name === 'verifier',
+            }
+          },
+        },
+        done: {
+          type: 'succeed',
+          result: ({ data }) => data,
+        },
+      },
+    })
+
+    const engine = new WorkflowEngine({ storage: memoryDriver() })
+    engine.register(workflow)
+    const started = await engine.start('isolation', {}, { metadata: { role: 'test' } })
+    await engine.runUntilIdle()
+
+    const execution = await engine.getExecution(started.id)
+    expect(execution.status).toBe('succeeded')
+    expect(execution.output.inputClean).toBe(true)
+    expect(execution.output.dataClean).toBe(true)
+    expect(execution.output.metadataClean).toBe(true)
+    expect(execution.output.stepsClean).toBe(true)
+    expect(execution.output.stepNameCorrect).toBe(true)
+  })
+
+  it('only merges plain objects into data, not arrays or primitives', async () => {
+    const returns = [42, 'hello', [1, 2], null, undefined, { merged: true }]
+    let stepIndex = 0
+
+    const workflow = defineWorkflow({
+      name: 'merge-types',
+      version: '1',
+      start: 's0',
+      steps: {
+        s0: { type: 'activity', next: 's1', run: () => returns[0] },
+        s1: { type: 'activity', next: 's2', run: () => returns[1] },
+        s2: { type: 'activity', next: 's3', run: () => returns[2] },
+        s3: { type: 'activity', next: 's4', run: () => returns[3] },
+        s4: { type: 'activity', next: 's5', run: () => returns[4] },
+        s5: { type: 'activity', next: 'done', run: () => returns[5] },
+        done: { type: 'succeed', result: ({ data }) => data },
+      },
+    })
+
+    const engine = new WorkflowEngine({ storage: memoryDriver() })
+    engine.register(workflow)
+    const started = await engine.start('merge-types', {})
+    await engine.runUntilIdle()
+
+    const execution = await engine.getExecution(started.id)
+    expect(execution.status).toBe('succeeded')
+    expect(execution.output).toEqual({ merged: true })
+    expect(execution.steps.s0.output).toBe(42)
+    expect(execution.steps.s1.output).toBe('hello')
+    expect(execution.steps.s2.output).toEqual([1, 2])
+    expect(execution.steps.s3.output).toBe(null)
+    expect(execution.steps.s4.output).toBe(null)
+  })
+
+  it('resume preserves attempt history and gives one more execution', async () => {
+    let totalAttempts = 0
+    let shouldPass = false
+
+    const workflow = defineWorkflow({
+      name: 'resume-retries',
+      version: '1',
+      start: 'work',
+      steps: {
+        work: {
+          type: 'activity',
+          next: 'done',
+          retry: { maxAttempts: 2, backoff: 0 },
+          run: async () => {
+            totalAttempts++
+            if (!shouldPass) throw new Error('fail')
+            return { ok: true }
+          },
+        },
+        done: { type: 'succeed' },
+      },
+    })
+
+    const engine = new WorkflowEngine({ storage: memoryDriver() })
+    engine.register(workflow)
+    const started = await engine.start('resume-retries', {})
+    await engine.runUntilIdle()
+
+    const failed = await engine.getExecution(started.id)
+    expect(failed.status).toBe('failed')
+    expect(failed.steps.work.attempts).toBe(2)
+
+    // resume does not reset attempts - retry budget from original run is consumed
+    // but the step always executes at least once on resume
+    shouldPass = true
+    await engine.resume(started.id)
+    await engine.runUntilIdle()
+
+    const resumed = await engine.getExecution(started.id)
+    expect(resumed.status).toBe('succeeded')
+    expect(resumed.steps.work.attempts).toBe(3)
+    expect(totalAttempts).toBe(3)
+  })
 })

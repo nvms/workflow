@@ -1,6 +1,4 @@
-function clone(value) {
-  return value == null ? value : JSON.parse(JSON.stringify(value))
-}
+import { clone } from './util.js'
 
 function normalizeRetry(retry) {
   if (retry == null) return { maxAttempts: 1, backoff: 0 }

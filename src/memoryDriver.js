@@ -1,6 +1,4 @@
-function clone(value) {
-  return value == null ? value : JSON.parse(JSON.stringify(value))
-}
+import { clone } from './util.js'
 
 export function memoryDriver() {
   const executions = new Map()

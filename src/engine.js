@@ -2,14 +2,11 @@ import { EventEmitter } from 'events'
 import { randomUUID } from 'crypto'
 import ms from '@prsm/ms'
 import { memoryDriver } from './memoryDriver.js'
+import { clone } from './util.js'
 
 const DEFAULT_RETRY = { maxAttempts: 1, backoff: 0 }
 const TERMINAL_EXECUTION_STATUSES = new Set(['succeeded', 'failed', 'canceled'])
 const PROCESSABLE_EXECUTION_STATUSES = new Set(['queued', 'waiting'])
-
-function clone(value) {
-  return value == null ? value : JSON.parse(JSON.stringify(value))
-}
 
 function serializeError(error) {
   if (!error) return { name: 'Error', message: 'Unknown error' }
@@ -69,7 +66,7 @@ function stepContext(execution, workflow, stepName) {
     },
     input: clone(execution.input),
     data: clone(execution.data),
-    metadata: execution.metadata,
+    metadata: clone(execution.metadata),
     steps: clone(execution.steps),
     step: {
       name: stepName,
@@ -356,7 +353,10 @@ export class WorkflowEngine extends EventEmitter {
     let nextStep
     if (definition.type === 'activity') nextStep = definition.next
     else if (definition.type === 'decision') nextStep = definition.transitions[stepState.route]
-    if (!nextStep) return
+
+    if (!nextStep) {
+      throw new Error(`cannot skip step "${stepName}" (type=${definition.type}): no next step resolvable`)
+    }
 
     const now = Date.now()
     execution.updatedAt = now
@@ -378,7 +378,8 @@ export class WorkflowEngine extends EventEmitter {
 
     const endedAt = Date.now()
     stepState.status = 'succeeded'
-    stepState.output = clone(output)
+    const clonedOutput = clone(output) ?? null
+    stepState.output = clonedOutput
     stepState.endedAt = endedAt
 
     this._setNextQueuedStep(execution, definition.next, endedAt)
@@ -392,7 +393,7 @@ export class WorkflowEngine extends EventEmitter {
     const saved = await this._storage.saveExecution(execution, { expectedLockOwner: this._owner })
     if (!saved) throw new LeaseLostError(execution.id, stepName)
 
-    this.emit('step:succeeded', { execution: clone(execution), step: stepName, output: clone(output) })
+    this.emit('step:succeeded', { execution: clone(execution), step: stepName, output: clonedOutput })
   }
 
   async _completeDecisionStep(execution, definition, stepName, stepState, route, heartbeat) {
