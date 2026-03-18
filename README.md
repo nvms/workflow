@@ -4,7 +4,7 @@
 
 <h1 align="center">@prsm/workflow</h1>
 
-Durable workflow engine with explicit steps, persisted execution state, retries, and inspectable history.
+Multi-step jobs that survive crashes. Define a workflow as a graph of steps - activities, decisions, terminal states. The engine persists every step's result to Postgres, picks up where it left off if a worker dies, and keeps a full journal of what happened. Multiple workers can process executions concurrently with lease-based coordination.
 
 ## Installation
 
@@ -33,9 +33,8 @@ const workflow = defineWorkflow({
       type: 'activity',
       next: 'route',
       retry: { maxAttempts: 3, backoff: '5s' },
-      run: async ({ input, data }) => {
-        data.message = input.message.trim()
-        return { normalized: data.message }
+      run: async ({ input }) => {
+        return { message: input.message.trim() }
       },
     },
     route: {
