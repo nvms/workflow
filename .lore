@@ -1,0 +1,46 @@
+-- pitfalls --
+
+only plain objects (non-null, non-array) get merged into data. if a step
+returns a string, number, array, null, or undefined, the value is stored
+in stepState.output but silently not merged. there is no warning. access
+non-object outputs via getStep(name).output instead.
+
+-- gotchas --
+
+engine.ready() is called implicitly by start/cancel/resume/runDue/etc,
+but storage.init() can be slow (creates tables). the first call that
+triggers ready() pays this cost. call engine.ready() explicitly at
+startup if you need predictable latency.
+
+the step context clones input, data, metadata, and steps - mutations
+inside a step function do not leak to the next step. but the clone uses
+JSON.parse(JSON.stringify()), so Date objects become strings, undefined
+values are dropped, and anything not JSON-serializable is lost.
+
+withTimeout races the step promise against a timer. if the timer wins,
+the step function keeps running in the background - there is no
+cancellation signal. the step context does not include an AbortSignal.
+design step handlers to be safe if they complete after the engine has
+already moved on.
+
+listExecutions supports limit but no cursor or offset. pagination
+through large result sets is not currently possible.
+
+journal is append-only with no truncation. for typical workflows this is
+fine, but workflows with many retries serialize the full journal on every
+save.
+
+-- integration --
+
+postgresDriver requires explicit connection config - either
+connectionString or individual host/port/database/user/password params.
+there are no built-in defaults. the pg library's own env var fallbacks
+(PGHOST, PGPORT, etc.) apply if individual params are omitted.
+
+sqliteDriver requires a filename. there is no in-memory sqlite mode
+exposed - use memoryDriver for ephemeral storage.
+
+storage drivers are plain objects with async methods, not classes.
+to write a custom driver, implement: init, createExecution, getExecution,
+saveExecution (with expectedLockOwner CAS semantics), claimAvailable
+(must be atomic/transactional), renewLease, listExecutions, close.
