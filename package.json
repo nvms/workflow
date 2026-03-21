@@ -1,6 +1,6 @@
 {
   "name": "@prsm/workflow",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "description": "Durable, inspectable workflow engine",
   "type": "module",
   "exports": {
@@ -44,7 +44,7 @@
     "url": "https://github.com/nvms/workflow/issues"
   },
   "dependencies": {
-    "@prsm/ms": "^1.0.1"
+    "@prsm/ms": "^2.0.0"
   },
   "peerDependencies": {
     "pg": "^8.0.0",
