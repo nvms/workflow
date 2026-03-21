@@ -21,6 +21,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
       - run: npm install
       - run: npm test
+        env:
+          WORKFLOW_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
