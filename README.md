@@ -93,6 +93,7 @@ Four step types:
 ```js
 {
   type: "decision",
+  timeout: "10s",
   transitions: {
     approved: "publish",
     rejected: "reject",
@@ -105,6 +106,8 @@ The chosen route is persisted in the step state and execution journal.
 
 If `decide()` returns a route name that is not in `transitions`, the step fails and normal retry/failure rules apply.
 
+Decision steps have no default timeout. If your `decide()` function calls external services, set `timeout` explicitly or a hanging call will block the worker indefinitely. Activity steps default to `defaultActivityTimeout` (30s); decisions and terminal steps default to no timeout unless you set one.
+
 ## Engine API
 
 ```js
@@ -115,6 +118,7 @@ const engine = new WorkflowEngine({
   defaultActivityTimeout: '30s',
   owner: 'node-a', // worker identity written into claims and checked on save
   batchSize: 10, // max executions to claim and process concurrently per polling cycle
+  maxJournalEntries: 100, // cap journal size, 0 = unlimited (default)
 })
 ```
 
@@ -298,6 +302,28 @@ Worker health:
 engine.on('execution:lease-lost', ({ executionId, step }) => {})
 engine.on('worker:error', ({ error }) => {})
 ```
+
+## Data Merging
+
+When an activity step returns a plain object, it is shallow-merged into `execution.data` via `Object.assign`. Subsequent steps see the merged result in `context.data`. Arrays, primitives, `null`, and `undefined` are stored in `step.output` but not merged.
+
+All context fields passed to step handlers are cloned - mutations inside a handler do not affect stored execution state.
+
+## Resuming Failed Executions
+
+`engine.resume(id)` re-queues a failed execution from the step that failed. The step's attempt counter is not reset - resume gives the step exactly one more execution attempt. If that attempt fails and the retry budget is already exhausted, the execution fails immediately.
+
+## Journal
+
+Every step start, completion, retry, routing decision, and terminal event is appended to `execution.journal`. By default the journal is unbounded. Set `maxJournalEntries` to cap it:
+
+```js
+const engine = new WorkflowEngine({
+  maxJournalEntries: 100, // keeps the most recent 100 entries
+})
+```
+
+When the limit is reached, older entries are dropped.
 
 ## How It Works
 

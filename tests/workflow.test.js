@@ -749,6 +749,67 @@ describe('@prsm/workflow', () => {
     expect(execution.steps.s4.output).toBe(null)
   })
 
+  it('times out a terminal step result function that exceeds its deadline', async () => {
+    const workflow = defineWorkflow({
+      name: 'slow-terminal',
+      version: '1',
+      start: 'work',
+      steps: {
+        work: {
+          type: 'activity',
+          next: 'done',
+          run: () => ({ ok: true }),
+        },
+        done: {
+          type: 'succeed',
+          timeout: 10,
+          result: () => new Promise((resolve) => setTimeout(resolve, 5000)),
+        },
+      },
+    })
+
+    const engine = new WorkflowEngine({ storage: memoryDriver() })
+    engine.register(workflow)
+    const started = await engine.start('slow-terminal', {})
+    await engine.runUntilIdle()
+
+    const execution = await engine.getExecution(started.id)
+    expect(execution.status).toBe('failed')
+    expect(execution.error.message).toMatch(/timed out/)
+  })
+
+  it('caps journal entries at maxJournalEntries', async () => {
+    let attempts = 0
+
+    const workflow = defineWorkflow({
+      name: 'journal-cap',
+      version: '1',
+      start: 'flaky',
+      steps: {
+        flaky: {
+          type: 'activity',
+          next: 'done',
+          retry: { maxAttempts: 50, backoff: 0 },
+          run: () => {
+            attempts++
+            if (attempts < 50) throw new Error('fail')
+            return { ok: true }
+          },
+        },
+        done: { type: 'succeed' },
+      },
+    })
+
+    const engine = new WorkflowEngine({ storage: memoryDriver(), maxJournalEntries: 20 })
+    engine.register(workflow)
+    const started = await engine.start('journal-cap', {})
+    await engine.runUntilIdle()
+
+    const execution = await engine.getExecution(started.id)
+    expect(execution.status).toBe('succeeded')
+    expect(execution.journal.length).toBeLessThanOrEqual(20)
+  })
+
   it('resume preserves attempt history and gives one more execution', async () => {
     let totalAttempts = 0
     let shouldPass = false

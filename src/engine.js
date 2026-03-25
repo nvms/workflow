@@ -107,6 +107,7 @@ export class WorkflowEngine extends EventEmitter {
     this._started = false
     this._activePoll = null
     this._batchSize = options.batchSize ?? 10
+    this._maxJournalEntries = options.maxJournalEntries ?? 0
   }
 
   async ready() {
@@ -181,6 +182,7 @@ export class WorkflowEngine extends EventEmitter {
       reason,
     })
 
+    this._trimJournal(execution)
     await this._storage.saveExecution(execution)
     this.emit('execution:canceled', { execution: clone(execution) })
     return clone(execution)
@@ -206,6 +208,7 @@ export class WorkflowEngine extends EventEmitter {
       step: execution.currentStep,
     })
 
+    this._trimJournal(execution)
     await this._storage.saveExecution(execution)
     this.emit('execution:queued', { execution: clone(execution) })
     return clone(execution)
@@ -316,6 +319,12 @@ export class WorkflowEngine extends EventEmitter {
     return matches[0]
   }
 
+  _trimJournal(execution) {
+    if (this._maxJournalEntries > 0 && execution.journal.length > this._maxJournalEntries) {
+      execution.journal = execution.journal.slice(-this._maxJournalEntries)
+    }
+  }
+
   _releaseLock(execution) {
     execution.lockOwner = null
     execution.lockExpiresAt = null
@@ -368,6 +377,7 @@ export class WorkflowEngine extends EventEmitter {
     })
     this._setNextQueuedStep(execution, nextStep, now)
 
+    this._trimJournal(execution)
     await this._storage.saveExecution(execution, { expectedLockOwner: this._owner })
   }
 
@@ -390,6 +400,7 @@ export class WorkflowEngine extends EventEmitter {
     })
 
     heartbeat.assertHeld()
+    this._trimJournal(execution)
     const saved = await this._storage.saveExecution(execution, { expectedLockOwner: this._owner })
     if (!saved) throw new LeaseLostError(execution.id, stepName)
 
@@ -418,6 +429,7 @@ export class WorkflowEngine extends EventEmitter {
     })
 
     heartbeat.assertHeld()
+    this._trimJournal(execution)
     const saved = await this._storage.saveExecution(execution, { expectedLockOwner: this._owner })
     if (!saved) throw new LeaseLostError(execution.id, stepName)
 
@@ -455,6 +467,7 @@ export class WorkflowEngine extends EventEmitter {
     })
 
     heartbeat.assertHeld()
+    this._trimJournal(execution)
     const saved = await this._storage.saveExecution(execution, { expectedLockOwner: this._owner })
     if (!saved) throw new LeaseLostError(execution.id, stepName)
 
@@ -490,7 +503,8 @@ export class WorkflowEngine extends EventEmitter {
         error: serialized,
       })
 
-      const saved = await this._storage.saveExecution(execution, { expectedLockOwner: this._owner })
+      this._trimJournal(execution)
+    const saved = await this._storage.saveExecution(execution, { expectedLockOwner: this._owner })
       if (!saved) {
         this.emit('execution:lease-lost', { executionId: execution.id, step: stepName })
         return
@@ -517,6 +531,7 @@ export class WorkflowEngine extends EventEmitter {
       error: serialized,
     })
 
+    this._trimJournal(execution)
     const saved = await this._storage.saveExecution(execution, { expectedLockOwner: this._owner })
     if (!saved) {
       this.emit('execution:lease-lost', { executionId: execution.id, step: stepName })
@@ -550,6 +565,7 @@ export class WorkflowEngine extends EventEmitter {
     }
 
     this._beginStepRun(execution, stepName, stepState)
+    this._trimJournal(execution)
     const started = await this._storage.saveExecution(execution, { expectedLockOwner: this._owner })
     if (!started) {
       this.emit('execution:lease-lost', { executionId: execution.id, step: stepName })
@@ -588,7 +604,11 @@ export class WorkflowEngine extends EventEmitter {
 
       if (definition.type === 'succeed' || definition.type === 'fail') {
         const output = typeof definition.result === 'function'
-          ? await Promise.resolve(definition.result(context))
+          ? await withTimeout(
+              Promise.resolve(definition.result(context)),
+              timeoutMs,
+              `Step "${stepName}" timed out after ${timeoutMs}ms`,
+            )
           : clone(definition.result ?? null)
         await this._completeTerminalStep(execution, definition, stepName, stepState, output, heartbeat)
       }
