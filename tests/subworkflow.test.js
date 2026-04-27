@@ -117,13 +117,20 @@ describe('subworkflow execution', () => {
     engine.register(childSucceed)
 
     const exec = await engine.start('parent', { n: 5 })
+
+    await engine.runDue()
+    const midParent = await engine.getExecution(exec.id)
+    expect(midParent.status).toBe('suspended')
+    expect(midParent.currentStep).toBe('sub')
+    expect(midParent.lockOwner).toBeNull()
+    expect(midParent.steps.sub.childExecutionId).toBeTruthy()
+
     await engine.runUntilIdle()
 
     const final = await engine.getExecution(exec.id)
     expect(final.status).toBe('succeeded')
     expect(final.output).toEqual({ child: { doubled: 10 } })
     expect(final.steps.sub.route).toBe('succeeded')
-    expect(final.steps.sub.childExecutionId).toBeTruthy()
 
     const journalTypes = final.journal.map((e) => e.type)
     expect(journalTypes).toContain('step.subworkflow-started')
@@ -132,6 +139,51 @@ describe('subworkflow execution', () => {
     const child = await engine.getExecution(final.steps.sub.childExecutionId)
     expect(child.status).toBe('succeeded')
     expect(child.parent).toEqual({ executionId: exec.id, step: 'sub' })
+  })
+
+  it('pins child to the version present at spawn time', async () => {
+    const engine = makeEngine()
+
+    const childV1 = defineWorkflow({
+      name: 'pinned', version: '1', start: 'work',
+      steps: {
+        work: { type: 'activity', next: 'done', run: () => ({ from: 'v1' }) },
+        done: { type: 'succeed', result: ({ data }) => data },
+      },
+    })
+    const childV2 = defineWorkflow({
+      name: 'pinned', version: '2', start: 'work',
+      steps: {
+        work: { type: 'activity', next: 'done', run: () => ({ from: 'v2' }) },
+        done: { type: 'succeed', result: ({ data }) => data },
+      },
+    })
+    const parentPinned = defineWorkflow({
+      name: 'parentPinned', version: '1', start: 'sub',
+      steps: {
+        sub: {
+          type: 'subworkflow',
+          workflow: 'pinned',
+          version: '1',
+          transitions: { succeeded: 'ok', failed: 'rej', canceled: 'rej' },
+        },
+        ok: { type: 'succeed', result: ({ steps }) => steps.sub.output.output },
+        rej: { type: 'fail' },
+      },
+    })
+
+    engine.register(parentPinned)
+    engine.register(childV1)
+    engine.register(childV2)
+
+    const exec = await engine.start('parentPinned', {})
+    await engine.runUntilIdle()
+
+    const final = await engine.getExecution(exec.id)
+    expect(final.output).toEqual({ from: 'v1' })
+
+    const child = await engine.getExecution(final.steps.sub.childExecutionId)
+    expect(child.workflowVersion).toBe('1')
   })
 
   it('routes to failed transition when child fails', async () => {

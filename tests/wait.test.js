@@ -129,18 +129,49 @@ describe('wait step suspension and signaling', () => {
     expect(journalTypes).toContain('step.routed')
   })
 
-  it('signal can route to a fail terminal', async () => {
+  it('awaits an async resolve function', async () => {
     const engine = makeEngine()
-    engine.register(buildWorkflow())
-    const exec = await engine.start('review', {})
+    engine.register(
+      defineWorkflow({
+        name: 'a', version: '1', start: 'gate',
+        steps: {
+          gate: {
+            type: 'wait',
+            transitions: { approved: 'done' },
+            resolve: async ({ signal }) => {
+              await new Promise((r) => setTimeout(r, 5))
+              return signal.decision
+            },
+          },
+          done: { type: 'succeed' },
+        },
+      }),
+    )
+    const exec = await engine.start('a', {})
+    await engine.runUntilIdle()
+    await engine.signal(exec.id, { decision: 'approved' })
+    await engine.runUntilIdle()
+    expect((await engine.getExecution(exec.id)).status).toBe('succeeded')
+  })
+
+  it('rejects signal when resolve is absent and payload has no route', async () => {
+    const engine = makeEngine()
+    engine.register(
+      defineWorkflow({
+        name: 'noresolve', version: '1', start: 'gate',
+        steps: {
+          gate: { type: 'wait', transitions: { approved: 'done' } },
+          done: { type: 'succeed' },
+        },
+      }),
+    )
+    const exec = await engine.start('noresolve', {})
     await engine.runUntilIdle()
 
-    await engine.signal(exec.id, { decision: 'rejected' })
-    await engine.runUntilIdle()
+    await expect(engine.signal(exec.id, { other: 'data' })).rejects.toThrow(/payload did not include/)
 
-    const final = await engine.getExecution(exec.id)
-    expect(final.status).toBe('failed')
-    expect(final.error).toEqual({ name: 'Rejected', message: 'no' })
+    const after = await engine.getExecution(exec.id)
+    expect(after.status).toBe('suspended')
   })
 
   it('signal with no resolve falls back to payload.route', async () => {
@@ -199,17 +230,27 @@ describe('wait step suspension and signaling', () => {
     await expect(engine.signal(exec.id, { decision: 'approved' })).rejects.toThrow(AlreadySignaledError)
   })
 
-  it('cancel from suspended is clean', async () => {
+  it('cancel on a suspended execution releases it cleanly', async () => {
     const engine = makeEngine()
     engine.register(buildWorkflow())
     const exec = await engine.start('review', {})
     await engine.runUntilIdle()
 
+    const events = []
+    engine.on('step:resumed', (e) => events.push(['resumed', e]))
+    engine.on('step:routed', (e) => events.push(['routed', e]))
+
     await engine.cancel(exec.id, 'changed our minds')
+    await engine.runUntilIdle()
 
     const final = await engine.getExecution(exec.id)
     expect(final.status).toBe('canceled')
     expect(final.error).toEqual({ name: 'Canceled', message: 'changed our minds' })
+    expect(final.lockOwner).toBeNull()
+    expect(final.availableAt).toBeNull()
+    expect(events).toHaveLength(0)
+
+    await expect(engine.signal(exec.id, { decision: 'approved' })).rejects.toThrow(AlreadySignaledError)
   })
 })
 
@@ -247,7 +288,7 @@ describe('wait step timeout', () => {
     expect(journalTypes).toContain('step.timed-out')
   })
 
-  it('signal arriving before timeout still wins', async () => {
+  it('signaling resolves the step even when a timeout is configured', async () => {
     const engine = makeEngine()
     engine.register(
       defineWorkflow({
