@@ -11,7 +11,7 @@ function normalizeRetry(retry) {
 }
 
 function inferEdgeLabels(step) {
-  if (step.type === 'decision') {
+  if (step.type === 'decision' || step.type === 'wait' || step.type === 'subworkflow') {
     return Object.entries(step.transitions).map(([label, to]) => ({
       from: step.name,
       to,
@@ -69,6 +69,42 @@ function validateStep(name, step, stepNames) {
     for (const [route, to] of Object.entries(step.transitions)) {
       if (!route) throw new Error(`decision step "${name}" has an empty route label`)
       if (!stepNames.has(to)) throw new Error(`decision step "${name}" route "${route}" points to unknown step "${to}"`)
+    }
+  } else if (step.type === 'wait') {
+    if (!step.transitions || typeof step.transitions !== 'object') {
+      throw new Error(`wait step "${name}" must define transitions`)
+    }
+    if (Object.keys(step.transitions).length === 0) {
+      throw new Error(`wait step "${name}" must define at least one transition`)
+    }
+    for (const [route, to] of Object.entries(step.transitions)) {
+      if (!route) throw new Error(`wait step "${name}" has an empty route label`)
+      if (!stepNames.has(to)) throw new Error(`wait step "${name}" route "${route}" points to unknown step "${to}"`)
+    }
+    if (step.resolve != null && typeof step.resolve !== 'function') {
+      throw new Error(`wait step "${name}" resolve must be a function if provided`)
+    }
+    if (step.timeout != null && !Object.hasOwn(step.transitions, 'timeout')) {
+      throw new Error(`wait step "${name}" defines timeout but has no "timeout" transition`)
+    }
+  } else if (step.type === 'subworkflow') {
+    if (typeof step.workflow !== 'string' || !step.workflow) {
+      throw new Error(`subworkflow step "${name}" must define a workflow name`)
+    }
+    if (!step.transitions || typeof step.transitions !== 'object') {
+      throw new Error(`subworkflow step "${name}" must define transitions`)
+    }
+    for (const route of ['succeeded', 'failed', 'canceled']) {
+      if (!Object.hasOwn(step.transitions, route)) {
+        throw new Error(`subworkflow step "${name}" missing required transition "${route}"`)
+      }
+    }
+    for (const [route, to] of Object.entries(step.transitions)) {
+      if (!route) throw new Error(`subworkflow step "${name}" has an empty route label`)
+      if (!stepNames.has(to)) throw new Error(`subworkflow step "${name}" route "${route}" points to unknown step "${to}"`)
+    }
+    if (step.input != null && typeof step.input !== 'function') {
+      throw new Error(`subworkflow step "${name}" input must be a function if provided`)
     }
   } else if (step.type === 'succeed' || step.type === 'fail') {
     if (step.next) throw new Error(`terminal step "${name}" cannot define next`)

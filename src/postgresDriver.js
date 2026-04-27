@@ -87,15 +87,6 @@ export function postgresDriver(options = {}) {
     async saveExecution(execution, options = {}) {
       await this.init()
 
-      const sql =
-        options.expectedLockOwner != null
-          ? `UPDATE workflow_executions
-           SET workflow = $1, status = $2, available_at = $3, lock_owner = $4, lock_expires_at = $5, updated_at = $6, body = $7::jsonb
-           WHERE id = $8 AND lock_owner = $9`
-          : `UPDATE workflow_executions
-           SET workflow = $1, status = $2, available_at = $3, lock_owner = $4, lock_expires_at = $5, updated_at = $6, body = $7::jsonb
-           WHERE id = $8`
-
       const params = [
         execution.workflow,
         execution.status,
@@ -107,11 +98,32 @@ export function postgresDriver(options = {}) {
         execution.id,
       ]
 
-      if (options.expectedLockOwner != null) params.push(options.expectedLockOwner)
+      const clauses = ['id = $8']
+      let nextIndex = 9
+      if (options.expectedLockOwner != null) {
+        clauses.push(`lock_owner = $${nextIndex++}`)
+        params.push(options.expectedLockOwner)
+      }
+      if (options.expectedStatus != null) {
+        clauses.push(`status = $${nextIndex++}`)
+        params.push(options.expectedStatus)
+      }
+      const sql = `UPDATE workflow_executions
+        SET workflow = $1, status = $2, available_at = $3, lock_owner = $4, lock_expires_at = $5, updated_at = $6, body = $7::jsonb
+        WHERE ${clauses.join(' AND ')}`
 
       const result = await query(sql, params)
-      if (options.expectedLockOwner != null && result.rowCount === 0) return null
+      if ((options.expectedLockOwner != null || options.expectedStatus != null) && result.rowCount === 0) return null
       return clone(execution)
+    },
+
+    async findChildren(parentExecutionId) {
+      await this.init()
+      const result = await query(
+        `SELECT body FROM workflow_executions WHERE body->'parent'->>'executionId' = $1`,
+        [parentExecutionId],
+      )
+      return result.rows.map((row) => row.body)
     },
 
     async claimAvailable({ now, owner, limit = 10, leaseMs }) {
@@ -123,7 +135,8 @@ export function postgresDriver(options = {}) {
         const selected = await client.query(
           `SELECT id, body
            FROM workflow_executions
-           WHERE status IN ('queued', 'waiting')
+           WHERE status IN ('queued', 'waiting', 'suspended')
+             AND available_at IS NOT NULL
              AND available_at <= $1
              AND (lock_owner IS NULL OR lock_expires_at IS NULL OR lock_expires_at <= $1)
            ORDER BY available_at ASC, created_at ASC

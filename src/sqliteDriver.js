@@ -39,7 +39,7 @@ export function sqliteDriver({ filename }) {
         id TEXT PRIMARY KEY,
         workflow TEXT NOT NULL,
         status TEXT NOT NULL,
-        available_at INTEGER NOT NULL,
+        available_at INTEGER,
         lock_owner TEXT,
         lock_expires_at INTEGER,
         created_at INTEGER NOT NULL,
@@ -73,7 +73,7 @@ export function sqliteDriver({ filename }) {
           execution.id,
           execution.workflow,
           execution.status,
-          execution.availableAt ?? 0,
+          execution.availableAt ?? null,
           execution.lockOwner ?? null,
           execution.lockExpiresAt ?? null,
           execution.createdAt,
@@ -91,29 +91,43 @@ export function sqliteDriver({ filename }) {
 
     async saveExecution(execution, options = {}) {
       await init
-      const sql =
-        options.expectedLockOwner != null
-          ? `UPDATE workflow_executions
-           SET workflow = ?, status = ?, available_at = ?, lock_owner = ?, lock_expires_at = ?, updated_at = ?, body = ?
-           WHERE id = ? AND lock_owner = ?`
-          : `UPDATE workflow_executions
-           SET workflow = ?, status = ?, available_at = ?, lock_owner = ?, lock_expires_at = ?, updated_at = ?, body = ?
-           WHERE id = ?`
+      const clauses = ['id = ?']
       const params = [
         execution.workflow,
         execution.status,
-        execution.availableAt ?? 0,
+        execution.availableAt ?? null,
         execution.lockOwner ?? null,
         execution.lockExpiresAt ?? null,
         execution.updatedAt,
         JSON.stringify(execution),
         execution.id,
       ]
-      if (options.expectedLockOwner != null) params.push(options.expectedLockOwner)
+      if (options.expectedLockOwner != null) {
+        clauses.push('lock_owner = ?')
+        params.push(options.expectedLockOwner)
+      }
+      if (options.expectedStatus != null) {
+        clauses.push('status = ?')
+        params.push(options.expectedStatus)
+      }
+      const sql = `UPDATE workflow_executions
+        SET workflow = ?, status = ?, available_at = ?, lock_owner = ?, lock_expires_at = ?, updated_at = ?, body = ?
+        WHERE ${clauses.join(' AND ')}`
 
       const result = await run(db, sql, params)
-      if (options.expectedLockOwner != null && result.changes === 0) return null
+      if ((options.expectedLockOwner != null || options.expectedStatus != null) && result.changes === 0) return null
       return clone(execution)
+    },
+
+    async findChildren(parentExecutionId) {
+      await init
+      const rows = await all(
+        db,
+        `SELECT body FROM workflow_executions
+         WHERE json_extract(body, '$.parent.executionId') = ?`,
+        [parentExecutionId],
+      )
+      return rows.map((row) => JSON.parse(row.body))
     },
 
     async claimAvailable({ now, owner, limit = 10, leaseMs }) {
@@ -124,7 +138,8 @@ export function sqliteDriver({ filename }) {
           db,
           `SELECT id
            FROM workflow_executions
-           WHERE status IN ('queued', 'waiting')
+           WHERE status IN ('queued', 'waiting', 'suspended')
+             AND available_at IS NOT NULL
              AND available_at <= ?
              AND (lock_owner IS NULL OR lock_expires_at IS NULL OR lock_expires_at <= ?)
            ORDER BY available_at ASC, created_at ASC

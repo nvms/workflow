@@ -64,14 +64,14 @@ console.log(result.output) // { outcome: "sent", message: "hello" }
 
 ## Step Types
 
-Four step types:
-
-| Type       | Purpose                                                     |
-| ---------- | ----------------------------------------------------------- |
-| `activity` | Run application code, then move to one explicit `next` step |
-| `decision` | Choose one route from a fixed `transitions` map             |
-| `succeed`  | End the workflow successfully                               |
-| `fail`     | End the workflow with a failure                             |
+| Type          | Purpose                                                          |
+| ------------- | ---------------------------------------------------------------- |
+| `activity`    | Run application code, then move to one explicit `next` step      |
+| `decision`    | Choose one route from a fixed `transitions` map                  |
+| `wait`        | Suspend the execution until an external signal or timeout        |
+| `subworkflow` | Spawn a child workflow and wait for it to terminate              |
+| `succeed`     | End the workflow successfully                                    |
+| `fail`        | End the workflow with a failure                                  |
 
 ### Activity
 
@@ -108,6 +108,51 @@ If `decide()` returns a route name that is not in `transitions`, the step fails 
 
 Decision steps have no default timeout. If your `decide()` function calls external services, set `timeout` explicitly or a hanging call will block the worker indefinitely. Activity steps default to `defaultActivityTimeout` (30s); decisions and terminal steps default to no timeout unless you set one.
 
+### Wait
+
+A wait step parks the execution in `suspended` status until something external delivers a signal. No handler runs while it waits. Use it for human approvals, external webhooks, queue messages, or any other "we cannot proceed without an outside event" gate.
+
+```js
+{
+  type: "wait",
+  timeout: "7d",
+  transitions: {
+    approved: "publish",
+    rejected: "archive",
+    timeout:  "remind",
+  },
+  resolve: ({ signal, data, steps }) => signal.decision,
+}
+```
+
+`resolve` maps the signal payload to one of the routes in `transitions`. If you omit `resolve`, the engine looks for `payload.route` instead.
+
+Resume the execution by calling `engine.signal(executionId, payload)`. The payload is recorded as the step's output for downstream steps and audit. `signal()` is idempotent: a duplicate call throws `AlreadySignaledError` and the execution is unchanged.
+
+If `timeout` is set, the engine fires the special `timeout` route automatically when the timer expires. Defining a `timeout` requires defining the `timeout` transition.
+
+### Subworkflow
+
+A subworkflow step starts a child workflow and waits for it to reach a terminal status. Same `suspended` machinery as `wait`, just driven by the child's terminal event instead of an external signal.
+
+```js
+{
+  type: "subworkflow",
+  workflow: "kyc-check",
+  version: "2",
+  input: ({ data, steps }) => ({ userId: data.userId }),
+  transitions: {
+    succeeded: "continue",
+    failed:    "reject",
+    canceled:  "reject",
+  },
+}
+```
+
+All three terminal routes (`succeeded`, `failed`, `canceled`) are required. The step's output is `{ executionId, status, output, error }` describing the child's terminal state, accessible via `steps[stepName].output` in later steps.
+
+Canceling a parent execution cascades to any suspended children. A child that terminates while its parent is no longer suspended is a clean no-op - the child's work still runs to completion in case it produced useful side effects.
+
 ## Engine API
 
 ```js
@@ -134,6 +179,7 @@ await engine.getExecution(id)
 await engine.listExecutions(filter?)
 await engine.cancel(id, reason?)
 await engine.resume(id)
+await engine.signal(id, payload)
 engine.describe(name, version?)
 ```
 
@@ -234,7 +280,7 @@ The Postgres adapter uses atomic claiming and owner-guarded saves so only one wo
 
 Each execution stores:
 
-- `status`: `queued | waiting | running | succeeded | failed | canceled`
+- `status`: `queued | waiting | running | suspended | succeeded | failed | canceled`
 - `currentStep`
 - `steps[stepName]` - persisted state for each step
 - `journal` - timeline of what happened during the execution
@@ -294,6 +340,8 @@ engine.on('step:succeeded', ({ execution, step, output }) => {})
 engine.on('step:routed', ({ execution, step, route, to }) => {})
 engine.on('step:retry', ({ execution, step, attempt, error, availableAt }) => {})
 engine.on('step:failed', ({ execution, step, attempt, error }) => {})
+engine.on('step:suspended', ({ execution, step, timeoutAt, childExecutionId }) => {})
+engine.on('step:resumed', ({ execution, step, route }) => {})
 ```
 
 Worker health:

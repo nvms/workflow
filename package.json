@@ -1,6 +1,6 @@
 {
   "name": "@prsm/workflow",
-  "version": "2.2.0",
+  "version": "3.0.0",
   "description": "Durable, inspectable workflow engine",
   "type": "module",
   "exports": {

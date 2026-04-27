@@ -8,6 +8,14 @@ const DEFAULT_RETRY = { maxAttempts: 1, backoff: 0 }
 const TERMINAL_EXECUTION_STATUSES = new Set(['succeeded', 'failed', 'canceled'])
 const PROCESSABLE_EXECUTION_STATUSES = new Set(['queued', 'waiting'])
 
+export class AlreadySignaledError extends Error {
+  constructor(executionId) {
+    super(`execution ${executionId} is no longer suspended`)
+    this.name = 'AlreadySignaledError'
+    this.executionId = executionId
+  }
+}
+
 function serializeError(error) {
   if (!error) return { name: 'Error', message: 'Unknown error' }
 
@@ -146,10 +154,50 @@ export class WorkflowEngine extends EventEmitter {
 
     const workflow = this._resolveWorkflow(name, options.version)
     const execution = this._createExecution(workflow, input, options)
+    if (options.parent) {
+      execution.parent = clone(options.parent)
+    }
 
     await this._storage.createExecution(execution)
     this.emit('execution:queued', { execution: clone(execution) })
     return clone(execution)
+  }
+
+  async signal(id, payload) {
+    await this.ready()
+
+    const execution = await this._storage.getExecution(id)
+    if (!execution) throw new Error(`execution not found: ${id}`)
+    if (execution.status !== 'suspended') {
+      throw new AlreadySignaledError(id)
+    }
+
+    const workflow = this._resolveWorkflow(execution.workflow, execution.workflowVersion)
+    const stepName = execution.currentStep
+    const definition = workflow.steps[stepName]
+    if (!definition || definition.type !== 'wait') {
+      throw new Error(`execution ${id} is not at a wait step`)
+    }
+
+    let route
+    if (typeof definition.resolve === 'function') {
+      const context = stepContext(execution, workflow, stepName)
+      route = await Promise.resolve(definition.resolve({ ...context, signal: clone(payload) }))
+    } else if (payload && typeof payload === 'object' && typeof payload.route === 'string') {
+      route = payload.route
+    } else {
+      throw new Error(`wait step "${stepName}" has no resolve function and signal payload did not include { route }`)
+    }
+
+    if (!Object.hasOwn(definition.transitions, route)) {
+      throw new Error(`wait step "${stepName}" returned unknown route "${route}"`)
+    }
+
+    return await this._resolveSuspendedStep(execution, definition, stepName, {
+      route,
+      output: clone(payload) ?? null,
+      journalEntry: { type: 'step.signaled', step: stepName, route, payload: clone(payload) ?? null },
+    })
   }
 
   async getExecution(id) {
@@ -185,7 +233,25 @@ export class WorkflowEngine extends EventEmitter {
     this._trimJournal(execution)
     await this._storage.saveExecution(execution)
     this.emit('execution:canceled', { execution: clone(execution) })
+
+    await this._cancelChildren(execution.id, `parent ${execution.id} canceled`)
+
+    if (execution.parent) {
+      await this._resolveSubworkflowParent(execution)
+    }
+
     return clone(execution)
+  }
+
+  async _cancelChildren(parentId, reason) {
+    if (!this._storage.findChildren) return
+    const children = await this._storage.findChildren(parentId)
+    for (const child of children) {
+      if (TERMINAL_EXECUTION_STATUSES.has(child.status)) continue
+      try {
+        await this.cancel(child.id, reason)
+      } catch {}
+    }
   }
 
   async resume(id) {
@@ -441,6 +507,158 @@ export class WorkflowEngine extends EventEmitter {
     })
   }
 
+  async _spawnSubworkflowStep(execution, definition, stepName, stepState, context, heartbeat) {
+    const childInput = typeof definition.input === 'function'
+      ? await Promise.resolve(definition.input(context))
+      : {}
+
+    const child = await this.start(definition.workflow, childInput, {
+      version: definition.version,
+      parent: { executionId: execution.id, step: stepName },
+    })
+
+    const now = Date.now()
+    stepState.status = 'awaiting'
+    stepState.endedAt = null
+    stepState.childExecutionId = child.id
+
+    execution.status = 'suspended'
+    execution.availableAt = null
+    execution.updatedAt = now
+    this._releaseLock(execution)
+    execution.journal.push({
+      type: 'step.subworkflow-started',
+      at: now,
+      step: stepName,
+      childExecutionId: child.id,
+      childWorkflow: definition.workflow,
+      childWorkflowVersion: child.workflowVersion,
+    })
+
+    heartbeat.assertHeld()
+    this._trimJournal(execution)
+    const saved = await this._storage.saveExecution(execution, { expectedLockOwner: this._owner })
+    if (!saved) throw new LeaseLostError(execution.id, stepName)
+
+    this.emit('step:suspended', { execution: clone(execution), step: stepName, childExecutionId: child.id })
+  }
+
+  async _resolveSubworkflowParent(child) {
+    if (!child.parent) return
+    const parent = await this._storage.getExecution(child.parent.executionId)
+    if (!parent) return
+    if (parent.status !== 'suspended') return
+    if (parent.currentStep !== child.parent.step) return
+
+    const workflow = this._resolveWorkflow(parent.workflow, parent.workflowVersion)
+    const definition = workflow.steps[child.parent.step]
+    if (!definition || definition.type !== 'subworkflow') return
+
+    const route = child.status
+    if (!Object.hasOwn(definition.transitions, route)) return
+
+    const childOutcome = {
+      executionId: child.id,
+      status: child.status,
+      output: clone(child.output ?? null),
+      error: clone(child.error ?? null),
+    }
+
+    try {
+      await this._resolveSuspendedStep(parent, definition, child.parent.step, {
+        route,
+        output: childOutcome,
+        journalEntry: {
+          type: 'step.subworkflow-resolved',
+          step: child.parent.step,
+          childExecutionId: child.id,
+          status: child.status,
+          route,
+        },
+      })
+    } catch (error) {
+      if (error instanceof AlreadySignaledError) return
+      throw error
+    }
+  }
+
+  async _suspendWaitStep(execution, definition, stepName, stepState, heartbeat) {
+    const now = Date.now()
+    const timeoutMs = definition.timeout != null ? normalizeMs(definition.timeout) : 0
+    const timeoutAt = timeoutMs > 0 ? now + timeoutMs : null
+
+    stepState.status = 'awaiting'
+    stepState.endedAt = null
+
+    execution.status = 'suspended'
+    execution.availableAt = timeoutAt
+    execution.updatedAt = now
+    this._releaseLock(execution)
+    execution.journal.push({
+      type: 'step.suspended',
+      at: now,
+      step: stepName,
+      timeoutAt,
+    })
+
+    heartbeat.assertHeld()
+    this._trimJournal(execution)
+    const saved = await this._storage.saveExecution(execution, { expectedLockOwner: this._owner })
+    if (!saved) throw new LeaseLostError(execution.id, stepName)
+
+    this.emit('step:suspended', { execution: clone(execution), step: stepName, timeoutAt })
+  }
+
+  async _fireWaitTimeout(execution, definition, stepName) {
+    const stepState = execution.steps[stepName]
+    if (!stepState) return null
+    if (!Object.hasOwn(definition.transitions, 'timeout')) {
+      throw new Error(`wait step "${stepName}" timed out but defines no "timeout" transition`)
+    }
+
+    return await this._resolveSuspendedStep(execution, definition, stepName, {
+      route: 'timeout',
+      output: null,
+      journalEntry: { type: 'step.timed-out', step: stepName },
+    })
+  }
+
+  async _resolveSuspendedStep(execution, definition, stepName, { route, output, journalEntry }) {
+    const stepState = execution.steps[stepName]
+    if (!stepState) throw new Error(`execution ${execution.id} has no state for step "${stepName}"`)
+
+    const now = Date.now()
+    stepState.status = 'succeeded'
+    stepState.output = output
+    stepState.route = route
+    stepState.endedAt = now
+
+    const nextStep = definition.transitions[route]
+    execution.journal.push({ at: now, ...journalEntry })
+    execution.journal.push({
+      type: 'step.routed',
+      at: now,
+      step: stepName,
+      route,
+      to: nextStep,
+    })
+
+    this._setNextQueuedStep(execution, nextStep, now)
+    this._trimJournal(execution)
+
+    const saved = await this._storage.saveExecution(execution, { expectedStatus: 'suspended' })
+    if (!saved) throw new AlreadySignaledError(execution.id)
+
+    this.emit('step:resumed', { execution: clone(execution), step: stepName, route })
+    this.emit('step:routed', {
+      execution: clone(execution),
+      step: stepName,
+      route,
+      to: nextStep,
+    })
+    return clone(execution)
+  }
+
   async _completeTerminalStep(execution, definition, stepName, stepState, output, heartbeat) {
     const endedAt = Date.now()
     const status = terminalState(definition.type)
@@ -472,6 +690,10 @@ export class WorkflowEngine extends EventEmitter {
     if (!saved) throw new LeaseLostError(execution.id, stepName)
 
     this.emit(`execution:${status}`, { execution: clone(execution) })
+
+    if (execution.parent) {
+      await this._resolveSubworkflowParent(execution)
+    }
   }
 
   async _handleStepFailure(execution, definition, stepName, stepState, error, heartbeat) {
@@ -545,18 +767,29 @@ export class WorkflowEngine extends EventEmitter {
       error: serialized,
     })
     this.emit('execution:failed', { execution: clone(execution) })
+
+    if (execution.parent) {
+      await this._resolveSubworkflowParent(execution)
+    }
   }
 
   async _processExecution(id) {
     const execution = await this._storage.getExecution(id)
     if (!execution) return
-    if (!PROCESSABLE_EXECUTION_STATUSES.has(execution.status)) return
     if (execution.lockOwner !== this._owner) return
 
     const workflow = this._resolveWorkflow(execution.workflow, execution.workflowVersion)
     const stepName = execution.currentStep
     const definition = workflow.steps[stepName]
     if (!definition) throw new Error(`execution ${id} points to unknown step "${stepName}"`)
+
+    if (execution.status === 'suspended') {
+      if (definition.type !== 'wait') return
+      await this._fireWaitTimeout(execution, definition, stepName)
+      return
+    }
+
+    if (!PROCESSABLE_EXECUTION_STATUSES.has(execution.status)) return
 
     const stepState = ensureStepState(execution, stepName)
     if (stepState.status === 'succeeded') {
@@ -599,6 +832,16 @@ export class WorkflowEngine extends EventEmitter {
         )
 
         await this._completeDecisionStep(execution, definition, stepName, stepState, route, heartbeat)
+        return
+      }
+
+      if (definition.type === 'wait') {
+        await this._suspendWaitStep(execution, definition, stepName, stepState, heartbeat)
+        return
+      }
+
+      if (definition.type === 'subworkflow') {
+        await this._spawnSubworkflowStep(execution, definition, stepName, stepState, context, heartbeat)
         return
       }
 

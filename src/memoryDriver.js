@@ -21,6 +21,9 @@ export function memoryDriver() {
       if (options.expectedLockOwner != null && current.lockOwner !== options.expectedLockOwner) {
         return null
       }
+      if (options.expectedStatus != null && current.status !== options.expectedStatus) {
+        return null
+      }
       executions.set(execution.id, clone(execution))
       return clone(execution)
     },
@@ -30,8 +33,8 @@ export function memoryDriver() {
 
       for (const execution of executions.values()) {
         if (claimed.length >= limit) break
-        if (!['queued', 'waiting'].includes(execution.status)) continue
-        if ((execution.availableAt ?? 0) > now) continue
+        if (!['queued', 'waiting', 'suspended'].includes(execution.status)) continue
+        if (execution.availableAt == null || execution.availableAt > now) continue
         if (execution.lockOwner && (execution.lockExpiresAt ?? 0) > now) continue
 
         execution.lockOwner = owner
@@ -41,6 +44,16 @@ export function memoryDriver() {
       }
 
       return claimed
+    },
+
+    async findChildren(parentExecutionId) {
+      const result = []
+      for (const execution of executions.values()) {
+        if (execution.parent && execution.parent.executionId === parentExecutionId) {
+          result.push(clone(execution))
+        }
+      }
+      return result
     },
 
     async renewLease(id, { now, owner, leaseMs }) {

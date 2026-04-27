@@ -162,4 +162,108 @@ describeIfPostgres("postgres driver", () => {
 
     await Promise.all([engineA.close(), engineB.close()])
   })
+
+  it("signals a wait step from one worker after another suspended it", async () => {
+    requirePostgres()
+
+    const reviewWorkflow = defineWorkflow({
+      name: "pg-review", version: "1", start: "gate",
+      steps: {
+        gate: {
+          type: "wait",
+          transitions: { approved: "ok", rejected: "rej" },
+          resolve: ({ signal }) => signal.decision,
+        },
+        ok: { type: "succeed", result: ({ steps }) => steps.gate.output },
+        rej: { type: "fail", result: () => ({ name: "R", message: "no" }) },
+      },
+    })
+
+    const engineA = new WorkflowEngine({ storage: postgresDriver({ connectionString }), owner: "a" })
+    const engineB = new WorkflowEngine({ storage: postgresDriver({ connectionString }), owner: "b" })
+    engineA.register(reviewWorkflow)
+    engineB.register(reviewWorkflow)
+
+    const execution = await engineA.start("pg-review", {})
+    await engineA.runUntilIdle()
+    expect((await engineA.getExecution(execution.id)).status).toBe("suspended")
+
+    await engineB.signal(execution.id, { decision: "approved", who: "alice" })
+    await engineB.runUntilIdle()
+
+    const final = await engineA.getExecution(execution.id)
+    expect(final.status).toBe("succeeded")
+    expect(final.output).toEqual({ decision: "approved", who: "alice" })
+
+    await Promise.all([engineA.close(), engineB.close()])
+  })
+
+  it("AlreadySignaledError is thrown when two workers signal the same suspended execution", async () => {
+    requirePostgres()
+
+    const reviewWorkflow = defineWorkflow({
+      name: "pg-race", version: "1", start: "gate",
+      steps: {
+        gate: { type: "wait", transitions: { approved: "ok" }, resolve: ({ signal }) => signal.decision },
+        ok: { type: "succeed" },
+      },
+    })
+
+    const engineA = new WorkflowEngine({ storage: postgresDriver({ connectionString }), owner: "a" })
+    const engineB = new WorkflowEngine({ storage: postgresDriver({ connectionString }), owner: "b" })
+    engineA.register(reviewWorkflow)
+    engineB.register(reviewWorkflow)
+
+    const exec = await engineA.start("pg-race", {})
+    await engineA.runUntilIdle()
+
+    const results = await Promise.allSettled([
+      engineA.signal(exec.id, { decision: "approved" }),
+      engineB.signal(exec.id, { decision: "approved" }),
+    ])
+
+    const fulfilled = results.filter((r) => r.status === "fulfilled")
+    const rejected = results.filter((r) => r.status === "rejected")
+    expect(fulfilled).toHaveLength(1)
+    expect(rejected).toHaveLength(1)
+    expect(rejected[0].reason.name).toBe("AlreadySignaledError")
+
+    await Promise.all([engineA.close(), engineB.close()])
+  })
+
+  it("findChildren locates child executions by parent id", async () => {
+    requirePostgres()
+
+    const child = defineWorkflow({
+      name: "pg-child", version: "1", start: "done",
+      steps: { done: { type: "succeed" } },
+    })
+    const parent = defineWorkflow({
+      name: "pg-parent", version: "1", start: "sub",
+      steps: {
+        sub: {
+          type: "subworkflow", workflow: "pg-child",
+          transitions: { succeeded: "ok", failed: "rej", canceled: "rej" },
+        },
+        ok: { type: "succeed" },
+        rej: { type: "fail" },
+      },
+    })
+
+    const engine = new WorkflowEngine({ storage: postgresDriver({ connectionString }) })
+    engine.register(parent)
+    engine.register(child)
+
+    const exec = await engine.start("pg-parent", {})
+    await engine.runUntilIdle()
+
+    const finalParent = await engine.getExecution(exec.id)
+    expect(finalParent.status).toBe("succeeded")
+    expect(finalParent.steps.sub.childExecutionId).toBeTruthy()
+
+    const childExec = await engine.getExecution(finalParent.steps.sub.childExecutionId)
+    expect(childExec.parent).toEqual({ executionId: exec.id, step: "sub" })
+
+    await engine.close()
+  })
 })
